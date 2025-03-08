@@ -36,7 +36,3 @@ class KnowledgeGraphMCP:
     def read_vector_table(self):
         response = self.supabase_client.table("game_embeddings").select("*").execute()
         return response.data
-
-
-    
- 
