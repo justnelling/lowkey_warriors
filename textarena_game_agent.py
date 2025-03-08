@@ -112,7 +112,7 @@ class RAGGameAgent(Agent):
                 return match.group(1)
         
         # If no match found, look for known game names
-        known_games = ["Poker", "Negotiation", "SpellingBee"]
+        known_games = ["Poker", "Negotiation", "Spelling Bee"]
         for game in known_games:
             if game.lower() in observation.lower():
                 return game

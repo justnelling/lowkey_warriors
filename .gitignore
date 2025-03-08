@@ -12,3 +12,6 @@ wheels/
 .env
 
 pgvector/
+
+# Folder
+TextArena/
