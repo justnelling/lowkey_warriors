@@ -359,6 +359,8 @@ class RAGGameAgent(Agent):
         """
         if not isinstance(observation, str):
             raise ValueError(f"Observation must be a string. Received type: {type(observation)}")
+        
+        # Simply call the retry request method directly
         return await self._retry_request(observation)
 
 
