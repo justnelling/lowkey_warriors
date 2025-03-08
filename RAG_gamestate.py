@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from supabase import create_client, Client
 from datetime import datetime
 import uuid
+import numpy as np
 
 # Load environment variables
 load_dotenv()
@@ -113,25 +114,48 @@ class GameStateManager:
         print("Game state database setup complete")
     
     def generate_embedding(self, text: str) -> List[float]:
-        """Generate embeddings using OpenAI's API"""
-        try:
-            # Clean and prepare text
-            text = text.replace("\n", " ").strip()
+        """
+        Generate an embedding for the given text
+        
+        Args:
+            text: Text to generate embedding for
             
-            # Handle empty text
-            if not text:
+        Returns:
+            List of floats representing the embedding
+        """
+        # Limit text size to avoid token limits
+        if len(text) > 8000:
+            text = text[:8000]
+            
+        try:
+            # Try OpenAI first
+            if openai_client:
+                response = openai_client.embeddings.create(
+                    model="text-embedding-3-small",
+                    input=text
+                )
+                embedding = response.data[0].embedding
+                # Ensure it's a list of floats
+                return [float(x) for x in embedding]
+            
+            # Fall back to Anthropic
+            elif self.anthropic_client:
+                response = self.anthropic_client.embeddings.create(
+                    model="claude-3-haiku-20240307",
+                    input=text
+                )
+                embedding = response.embeddings[0]
+                # Ensure it's a list of floats
+                return [float(x) for x in embedding]
+            
+            else:
+                print("No embedding client available")
+                # Return a zero vector as fallback
                 return [0.0] * EMBEDDING_DIMENSION
                 
-            # Generate embedding
-            response = openai_client.embeddings.create(
-                model=EMBEDDING_MODEL,
-                input=text
-            )
-            
-            # Convert to list and return
-            return list(response.data[0].embedding)
         except Exception as e:
             print(f"Error generating embedding: {str(e)}")
+            # Return a zero vector as fallback
             return [0.0] * EMBEDDING_DIMENSION
     
     async def start_game_session(self, game_name: str, opponent: str = "unknown") -> str:
@@ -282,32 +306,146 @@ class GameStateManager:
             # Generate embedding for the observation
             embedding = self.generate_embedding(observation)
             
-            # Build the query
-            query = """
-            SELECT gt.*, gs.game_name, gs.outcome, gs.outcome_reason
-            FROM game_turns gt
-            JOIN game_sessions gs ON gt.session_id = gs.id
-            WHERE gt.observation_embedding IS NOT NULL
-            AND gt.action IS NOT NULL
-            """
-            
-            # Add game name filter if provided
+            # Use direct query instead of exec_sql function
+            # First, get all game turns with embeddings
             if game_name:
-                query += f" AND gs.game_name = '{game_name}'"
+                # Filter by game name
+                result = supabase.table("game_turns").select("*, game_sessions(game_name, outcome, outcome_reason)").execute()
+                
+                # Filter results manually
+                filtered_data = []
+                for item in result.data:
+                    if (item.get("game_sessions", {}).get("game_name") == game_name and
+                        item.get("observation_embedding") is not None and
+                        item.get("action") is not None):
+                        filtered_data.append(item)
+                
+                result.data = filtered_data
+            else:
+                # Get all games
+                result = supabase.table("game_turns").select("*, game_sessions(game_name, outcome, outcome_reason)").execute()
+                
+                # Filter results manually
+                filtered_data = []
+                for item in result.data:
+                    if (item.get("observation_embedding") is not None and
+                        item.get("action") is not None):
+                        filtered_data.append(item)
+                
+                result.data = filtered_data
             
-            # Add vector similarity search and limit
-            query += f"""
-            ORDER BY gt.observation_embedding <=> '{embedding}'::vector
-            LIMIT {limit}
-            """
-            
-            # Execute the query
-            result = supabase.rpc('exec_sql', {'query': query}).execute()
+            # If we have results, we'll need to sort them manually by similarity
+            if result.data:
+                # Calculate similarity for each result
+                for item in result.data:
+                    # Skip items without embeddings
+                    if not item.get("observation_embedding"):
+                        item["similarity"] = 0
+                        continue
+                    
+                    # Calculate cosine similarity
+                    item_embedding = item["observation_embedding"]
+                    similarity = self._calculate_similarity(embedding, item_embedding)
+                    item["similarity"] = similarity
+                
+                # Sort by similarity (highest first)
+                result.data.sort(key=lambda x: x.get("similarity", 0), reverse=True)
+                
+                # Limit to the requested number
+                result.data = result.data[:limit]
             
             return result.data
         except Exception as e:
             print(f"Error retrieving similar observations: {str(e)}")
             return []
+    
+    def _calculate_similarity(self, embedding1, embedding2):
+        """Calculate cosine similarity between two embeddings"""
+        try:
+            # Debug info
+            print(f"Embedding1 type: {type(embedding1)}")
+            if isinstance(embedding1, str):
+                print(f"Embedding1 dtype: {np.dtype(type(embedding1))}")
+                print(f"Embedding1 preview: {embedding1[:50]}...")
+            
+            print(f"Embedding2 type: {type(embedding2)}")
+            if isinstance(embedding2, str):
+                print(f"Embedding2 dtype: {np.dtype(type(embedding2))}")
+                print(f"Embedding2 preview: {embedding2[:50]}...")
+            
+            # Convert embeddings to proper format
+            # Case 1: Handle string embeddings
+            if isinstance(embedding1, str):
+                try:
+                    # Try to parse as JSON
+                    if embedding1.startswith('[') and embedding1.endswith(']'):
+                        embedding1 = json.loads(embedding1)
+                    else:
+                        # If it's not JSON, try to convert directly to float list
+                        # First, clean the string by removing brackets and splitting by commas
+                        cleaned = embedding1.strip('[]').replace(' ', '').split(',')
+                        embedding1 = [float(x) for x in cleaned if x]
+                except (json.JSONDecodeError, ValueError) as e:
+                    print(f"Error parsing embedding1: {e}")
+                    # Create a zero vector as fallback
+                    embedding1 = [0.0] * EMBEDDING_DIMENSION
+            
+            if isinstance(embedding2, str):
+                try:
+                    # Try to parse as JSON
+                    if embedding2.startswith('[') and embedding2.endswith(']'):
+                        embedding2 = json.loads(embedding2)
+                    else:
+                        # If it's not JSON, try to convert directly to float list
+                        # First, clean the string by removing brackets and splitting by commas
+                        cleaned = embedding2.strip('[]').replace(' ', '').split(',')
+                        embedding2 = [float(x) for x in cleaned if x]
+                except (json.JSONDecodeError, ValueError) as e:
+                    print(f"Error parsing embedding2: {e}")
+                    # Create a zero vector as fallback
+                    embedding2 = [0.0] * EMBEDDING_DIMENSION
+            
+            # Case 2: Handle PostgreSQL vector type
+            # PostgreSQL vector might be represented as a list-like object but not a Python list
+            if hasattr(embedding1, '__iter__') and not isinstance(embedding1, (list, np.ndarray)):
+                embedding1 = list(embedding1)
+            
+            if hasattr(embedding2, '__iter__') and not isinstance(embedding2, (list, np.ndarray)):
+                embedding2 = list(embedding2)
+            
+            # Convert to numpy arrays with explicit float type
+            try:
+                vec1 = np.array(embedding1, dtype=np.float64)
+                vec2 = np.array(embedding2, dtype=np.float64)
+                
+                # Ensure vectors have the same dimension
+                if len(vec1) != len(vec2):
+                    print(f"Warning: Embedding dimensions don't match: {len(vec1)} vs {len(vec2)}")
+                    # Pad the shorter one with zeros
+                    if len(vec1) < len(vec2):
+                        vec1 = np.pad(vec1, (0, len(vec2) - len(vec1)), 'constant')
+                    else:
+                        vec2 = np.pad(vec2, (0, len(vec1) - len(vec2)), 'constant')
+                
+                # Calculate cosine similarity
+                dot_product = np.dot(vec1, vec2)
+                norm1 = np.linalg.norm(vec1)
+                norm2 = np.linalg.norm(vec2)
+                
+                if norm1 == 0 or norm2 == 0:
+                    return 0
+                    
+                similarity = dot_product / (norm1 * norm2)
+                print(f"Calculated similarity: {similarity}")
+                return similarity
+                
+            except (ValueError, TypeError) as e:
+                print(f"Error converting embeddings to numeric arrays: {e}")
+                return 0
+                
+        except Exception as e:
+            print(f"Error calculating similarity: {str(e)}")
+            return 0
     
     async def retrieve_game_patterns(self, game_name: str, observation: str, limit: int = 3) -> List[Dict]:
         """
@@ -325,8 +463,39 @@ class GameStateManager:
             # Generate embedding for the observation
             embedding = self.generate_embedding(observation)
             
-            # Query for similar patterns
-            result = supabase.table("game_patterns").select("*").eq("game_name", game_name).order(f"pattern_embedding <=> '{embedding}'::vector").limit(limit).execute()
+            # Limit observation size to avoid 414 errors
+            short_observation = observation[:500] + "..." if len(observation) > 500 else observation
+            
+            # Get all patterns for this game
+            result = supabase.table("game_patterns").select("*").eq("game_name", game_name).execute()
+            
+            # Filter results manually
+            filtered_data = []
+            for item in result.data:
+                if item.get("pattern_embedding") is not None:
+                    filtered_data.append(item)
+            
+            result.data = filtered_data
+            
+            # If we have results, we'll need to sort them manually by similarity
+            if result.data:
+                # Calculate similarity for each result
+                for item in result.data:
+                    # Skip items without embeddings
+                    if not item.get("pattern_embedding"):
+                        item["similarity"] = 0
+                        continue
+                    
+                    # Calculate cosine similarity
+                    item_embedding = item["pattern_embedding"]
+                    similarity = self._calculate_similarity(embedding, item_embedding)
+                    item["similarity"] = similarity
+                
+                # Sort by similarity (highest first)
+                result.data.sort(key=lambda x: x.get("similarity", 0), reverse=True)
+                
+                # Limit to the requested number
+                result.data = result.data[:limit]
             
             return result.data
         except Exception as e:
@@ -557,7 +726,15 @@ class GameStateManager:
             List of common outcomes with their reasons and frequencies
         """
         try:
-            result = supabase.table("game_outcomes").select("*").eq("game_name", game_name).order("frequency", {"ascending": False}).limit(limit).execute()
+            # Get all outcomes for this game
+            result = supabase.table("game_outcomes").select("*").eq("game_name", game_name).execute()
+            
+            # Sort manually by frequency
+            if result.data:
+                result.data.sort(key=lambda x: x.get("frequency", 0), reverse=True)
+                
+                # Limit to the requested number
+                result.data = result.data[:limit]
             
             return result.data
         except Exception as e:
