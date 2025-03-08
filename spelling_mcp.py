@@ -45,8 +45,13 @@ def initialize_game(allowed_letters: List[str]) -> Dict[str, Any]:
     """
     global GAME_STATE
     
-    # Ensure all letters are lowercase
-    cleaned_letters = [letter.lower() for letter in allowed_letters]
+    # Handle if allowed_letters is passed as a single string
+    if len(allowed_letters) == 1 and len(allowed_letters[0]) > 1:
+        # Split the string into individual letters
+        cleaned_letters = [letter.lower() for letter in allowed_letters[0]]
+    else:
+        # Ensure all letters are lowercase
+        cleaned_letters = [letter.lower() for letter in allowed_letters]
     
     GAME_STATE = {
         "allowed_letters": cleaned_letters,
@@ -116,10 +121,10 @@ def check_word(word: str, ctx: Context) -> Dict[str, Any]:
     return result
 
 @mcp.tool()
-def find_valid_words(max_suggestions: int = 10) -> Dict[str, Any]:
+def find_valid_words(max_suggestions: int = 50) -> Dict[str, Any]:
     """
     Find valid words for the current game using allowed letters.
-    Returns words organized by length.
+    Returns words organized by length, prioritizing the longest words.
     
     Args:
         max_suggestions: Maximum number of suggestions to return per length
@@ -144,14 +149,33 @@ def find_valid_words(max_suggestions: int = 10) -> Dict[str, Any]:
         }
     
     logger.info(f"Finding valid words with letters: {allowed_letters}")
+    
+    # Ensure allowed_letters is a list of individual characters
+    if len(allowed_letters) == 1 and len(allowed_letters[0]) > 1:
+        allowed_letters = list(allowed_letters[0])
+    
+    # Create a set for faster lookups
+    allowed_set = set(l.lower() for l in allowed_letters)
+    
+    # Find all valid words
     all_possible_words = []
+    
+    # Check each word in the dictionary
     for word in dictionary.get_all_words():
+        word = word.lower()
         # Check if word only uses allowed letters
-        if all(letter in allowed_letters for letter in word):
+        if all(letter in allowed_set for letter in word) and len(word) >= 3:
             all_possible_words.append(word)
     
     # Sort words by length (longest first)
     all_possible_words.sort(key=len, reverse=True)
+    
+    logger.info(f"Found {len(all_possible_words)} valid words")
+    
+    # Log a sample of the words found (for debugging)
+    if all_possible_words:
+        sample = all_possible_words[:10]
+        logger.info(f"Sample of found words: {sample}")
     
     # Organize words by length
     words_by_length = {}
@@ -169,7 +193,6 @@ def find_valid_words(max_suggestions: int = 10) -> Dict[str, Any]:
         "words_by_length": {str(k): v for k, v in words_by_length.items()}
     }
     
-    logger.info(f"Found {len(all_possible_words)} valid words")
     return result
 
 @mcp.tool()
@@ -222,6 +245,47 @@ def find_similar_valid_words(word: str, allowed_letters: List[str]) -> List[str]
                     break
     
     return suggestions
+
+# Add a new tool to generate all possible permutations for debugging
+@mcp.tool()
+def debug_generate_words(letters: str) -> Dict[str, Any]:
+    """
+    Debug tool to generate all possible words from a set of letters.
+    
+    Args:
+        letters: String of letters to use
+        
+    Returns:
+        List of valid words that can be formed
+    """
+    if dictionary is None:
+        return {"error": "Dictionary not loaded"}
+    
+    letters = letters.lower()
+    logger.info(f"Generating words from letters: {letters}")
+    
+    # Create a set for faster lookups
+    letters_set = set(letters)
+    
+    # Find all valid words
+    valid_words = []
+    
+    # Check each word in the dictionary
+    for word in dictionary.get_all_words():
+        word = word.lower()
+        # Check if word only uses allowed letters
+        if all(letter in letters_set for letter in word) and len(word) >= 3:
+            valid_words.append(word)
+    
+    # Sort words by length (longest first)
+    valid_words.sort(key=len, reverse=True)
+    
+    logger.info(f"Found {len(valid_words)} valid words")
+    
+    # Return the first 100 words or fewer
+    sample = valid_words[:100]
+    
+    return {"valid_words": sample}
 
 if __name__ == "__main__":
     # This allows the MCP server to run directly when executed as a script

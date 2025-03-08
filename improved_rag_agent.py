@@ -137,13 +137,25 @@ class ImprovedRAGAgent(RAGGameAgent):
         if allowed_letters_match:
             letters_str = allowed_letters_match.group(1).strip()
             allowed_letters = [letter.lower() for letter in letters_str.split()]
+            if self.verbose:
+                print(f"Extracted allowed letters from explicit mention: {allowed_letters}")
+            return allowed_letters
+        
+        # Try to extract from np.str_ format
+        np_str_match = re.findall(r"np\.str_\('([a-z])'\)", observation, re.IGNORECASE)
+        if np_str_match:
+            allowed_letters = [letter.lower() for letter in np_str_match]
+            if self.verbose:
+                print(f"Extracted allowed letters from np.str_ format: {allowed_letters}")
             return allowed_letters
         
         # Alternate format: they may be listed differently
-        letters_match = re.findall(r'\b([a-z])\b', observation)
+        letters_match = re.findall(r'\b([a-z])\b', observation.lower())
         if letters_match:
             # Filter to ensure we only get unique lowercase letters
-            allowed_letters = list(set([letter.lower() for letter in letters_match]))
+            allowed_letters = list(set(letters_match))
+            if self.verbose:
+                print(f"Extracted allowed letters from general text: {allowed_letters}")
             return allowed_letters
         
         return []
@@ -365,46 +377,49 @@ class ImprovedRAGAgent(RAGGameAgent):
                 allowed_letters = await self._extract_spelling_bee_info(observation)
                 if allowed_letters:
                     await self.initialize_game(allowed_letters)
-                    
-            # Check if we need to submit a word
-            if "create the longest possible" in observation.lower() or "your turn" in observation.lower():
-                if self.is_mcp_running():
-                    # Use MCP to find valid words sorted by length
-                    try:
-                        word_results = await self.call_mcp_tool("find_valid_words", {"max_suggestions": 20})
-                        if self.verbose:
-                            print(f"MCP find_valid_words result: {word_results}")
-                        
-                        # Find the longest word from the suggestions
-                        best_word = ""
-                        if "words_by_length" in word_results:
-                            words_by_length = word_results["words_by_length"]
-                            # Find the longest length that has words
-                            for length in sorted([int(k) for k in words_by_length.keys()], reverse=True):
-                                words = words_by_length[str(length)]
-                                if words:
-                                    best_word = words[0]
-                                    break
-                        
-                        if best_word:
-                            # Format the word for submission
-                            action = await self.format_word_for_submission(best_word)
-                            reasoning = f"Submitting '{best_word}' as it's a valid word with {len(best_word)} letters using the allowed letters."
-                            
-                            # Update the turn with action and reasoning
-                            await self.state_manager.update_turn_action(
-                                self.current_session_id,
-                                self.current_turn,
-                                action,
-                                reasoning
-                            )
-                            
-                            return action, reasoning
-                    except Exception as e:
-                        if self.verbose:
-                            print(f"Error calling MCP find_valid_words: {e}")
                 
-                # If MCP failed or returned no words, fallback to base RAG approach
+            # Try to find and submit the longest valid word
+            if self.is_mcp_running():
+                try:
+                    # Use MCP to find valid words sorted by length
+                    word_results = await self.call_mcp_tool("find_valid_words", {"max_suggestions": 50})
+                    if self.verbose:
+                        print(f"MCP find_valid_words result: {word_results}")
+                    
+                    # Find the longest word from the suggestions
+                    best_word = ""
+                    if "words_by_length" in word_results:
+                        words_by_length = word_results["words_by_length"]
+                        # Find the longest length that has words
+                        for length in sorted([int(k) for k in words_by_length.keys()], reverse=True):
+                            words = words_by_length[str(length)]
+                            if words:
+                                best_word = words[0].lower()  # Ensure lowercase
+                                break
+                    
+                    if best_word:
+                        # Submit the word in the correct format with brackets
+                        action = f"[{best_word}]"
+                        reasoning = f"Submitting '{best_word}' as it's a valid word with {len(best_word)} letters using the allowed letters."
+                        
+                        # Update the turn with action and reasoning
+                        await self.state_manager.update_turn_action(
+                            self.current_session_id,
+                            self.current_turn,
+                            action,
+                            reasoning
+                        )
+                        
+                        return action, reasoning
+                    else:
+                        # If no valid words found, fall back to the base RAG approach
+                        if self.verbose:
+                            print("No valid words found, falling back to base RAG approach")
+                except Exception as e:
+                    if self.verbose:
+                        print(f"Error calling MCP find_valid_words: {e}")
+            
+            # If MCP failed or returned no words, fallback to base RAG approach
         
         # For other games or if the special handling didn't return, fall back to the base RAG approach
         # But first, decrement the turn counter since it will be incremented again in the super method
@@ -413,7 +428,7 @@ class ImprovedRAGAgent(RAGGameAgent):
         # Call the parent class's generate_action method
         action, reasoning = await super().generate_action(observation, player_id)
         
-        # If this is Spelling Bee, ensure the response is properly formatted
+        # If this is Spelling Bee, ensure the response is properly formatted with brackets
         if normalized_game_name == "spellingbee":
             # Make sure the action contains a word in brackets
             if not (action.startswith('[') and action.endswith(']')):
@@ -426,7 +441,7 @@ class ImprovedRAGAgent(RAGGameAgent):
                     check_result = await self.check_word(word)
                     
                     if check_result.get("is_valid", False):
-                        new_action = await self.format_word_for_submission(word)
+                        new_action = f"[{word.lower()}]"
                         new_reasoning = f"Formatted '{word}' for submission: {new_action}"
                         
                         # Update the turn with formatted action and reasoning
@@ -438,12 +453,47 @@ class ImprovedRAGAgent(RAGGameAgent):
                         )
                         
                         return new_action, new_reasoning
-            
-            # For Spelling Bee, ensure the action is lowercase
-            if isinstance(action, str) and action.isalpha():
-                action = action.lower()
+                    else:
+                        # Word not valid, try to find a valid word using allowed letters
+                        if self.spelling_dictionary and self.game_state.get("allowed_letters"):
+                            allowed_letters = self.game_state.get("allowed_letters")
+                            valid_words = []
+                            
+                            # Simple search for a valid word
+                            for dict_word in self.spelling_dictionary.get_all_words():
+                                if (len(dict_word) >= 4 and
+                                    all(letter in allowed_letters for letter in dict_word)):
+                                    valid_words.append(dict_word)
+                                    if len(valid_words) >= 10:
+                                        break
+                            
+                            if valid_words:
+                                # Sort by length and take the longest
+                                valid_words.sort(key=len, reverse=True)
+                                word = valid_words[0].lower()
+                                new_action = f"[{word}]"
+                                new_reasoning = f"Submitting valid word '{word}' instead of invalid word."
+                                return new_action, new_reasoning
+                
+                # If we couldn't extract a valid word, format the original response with brackets
+                # but only if it's short enough to potentially be a word
+                if len(action) <= 15 and action.isalpha():
+                    action = f"[{action.lower()}]"
         
         return action, reasoning
+
+    def get_fallback_word(self) -> str:
+        """Get a fallback word when no optimal word can be found"""
+        allowed_letters = self.game_state.get("allowed_letters", [])
+        if not allowed_letters:
+            return "test"  # Absolute fallback
+        
+        # Try to construct a valid word from the allowed letters
+        if len(allowed_letters) >= 4:
+            return ''.join(allowed_letters[:4])
+        else:
+            # If we have fewer than 4 letters, repeat some to reach minimum length
+            return ''.join(allowed_letters) + allowed_letters[0] * (4 - len(allowed_letters))
 
     async def call_mcp_tool(self, tool_name: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -470,6 +520,21 @@ class ImprovedRAGAgent(RAGGameAgent):
             
             # Call the tool using the MCP session
             result = await self.mcp_session.call_tool(tool_name, params)
+            
+            # Parse the nested response structure
+            if hasattr(result, "content") and isinstance(result.content, list) and len(result.content) > 0:
+                content_item = result.content[0]
+                if hasattr(content_item, "text") and content_item.text:
+                    try:
+                        # Parse the JSON string inside the text field
+                        parsed_data = json.loads(content_item.text)
+                        if self.verbose:
+                            print(f"Successfully parsed MCP response: {parsed_data}")
+                        return parsed_data
+                    except json.JSONDecodeError:
+                        if self.verbose:
+                            print(f"Failed to parse JSON in MCP response: {content_item.text}")
+                        return {"content": content_item.text}
             
             # Convert result to dictionary if needed
             if hasattr(result, "model_dump"):
