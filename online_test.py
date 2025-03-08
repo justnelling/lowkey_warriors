@@ -3,6 +3,7 @@ import time
 import asyncio
 import traceback
 from textarena_game_agent import RAGGameAgent
+from improved_rag_agent import ImprovedRAGAgent
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -15,6 +16,9 @@ def run_game_with_async_agent():
     """Run a single game with an async agent in a synchronous environment"""
     # Initialize agent
     agent = RAGGameAgent()
+    #agent = ImprovedRAGAgent(verbose=True, mcp_path="spelling_mcp.py")
+    #print(f"Player {player_id} MCP running before game: {agent.is_mcp_running()}")
+
     env = None
     
     try:
@@ -34,6 +38,8 @@ def run_game_with_async_agent():
         
         done = False
         info = {}
+        #print(f"Player {player_id} MCP running after game: {agent.is_mcp_running()}")
+
         
         while not done:
             try:
