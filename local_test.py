@@ -7,20 +7,23 @@ load_dotenv()
 
 # Initialize agents
 agents = {
-    0: ta.agents.OpenRouterAgent(model_name="GPT-4o-mini"),
+    # 0: ta.agents.OpenRouterAgent(model_name="GPT-4o-mini"),
+    0: ta.agents.OpenAIAgent(model_name="gpt-4"),
     1: RAGGameAgent(),
 }
 
 async def run_game():
     # Initialize environment from subset and wrap it
-    env = ta.make(env_id="SpellingBee-v0")
+    env = ta.make(env_id="SimpleNegotiation-v0")
     env = ta.wrappers.LLMObservationWrapper(env=env)
     env = ta.wrappers.SimpleRenderWrapper(
         env=env,
-        player_names={0: "GPT-4o-mini", 1: "LOWKEY"},
+        player_names={0: "GPT-4", 1: "LOWKEY"},
     )
 
+    # Reset the environment with the number of players
     env.reset(num_players=len(agents))
+    
     done = False
     while not done:
         player_id, observation = env.get_observation()

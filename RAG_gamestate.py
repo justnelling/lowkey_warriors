@@ -362,17 +362,6 @@ class GameStateManager:
     def _calculate_similarity(self, embedding1, embedding2):
         """Calculate cosine similarity between two embeddings"""
         try:
-            # Debug info
-            print(f"Embedding1 type: {type(embedding1)}")
-            if isinstance(embedding1, str):
-                print(f"Embedding1 dtype: {np.dtype(type(embedding1))}")
-                print(f"Embedding1 preview: {embedding1[:50]}...")
-            
-            print(f"Embedding2 type: {type(embedding2)}")
-            if isinstance(embedding2, str):
-                print(f"Embedding2 dtype: {np.dtype(type(embedding2))}")
-                print(f"Embedding2 preview: {embedding2[:50]}...")
-            
             # Convert embeddings to proper format
             # Case 1: Handle string embeddings
             if isinstance(embedding1, str):
@@ -436,7 +425,6 @@ class GameStateManager:
                     return 0
                     
                 similarity = dot_product / (norm1 * norm2)
-                print(f"Calculated similarity: {similarity}")
                 return similarity
                 
             except (ValueError, TypeError) as e:
