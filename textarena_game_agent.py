@@ -4,6 +4,7 @@ import json
 import asyncio
 from typing import Dict, Any, Tuple, Optional, List
 from dotenv import load_dotenv
+from textarena.core import Agent
 
 # Import the GameStateManager from RAG_gamestate
 from RAG_gamestate import GameStateManager
@@ -11,15 +12,21 @@ from RAG_gamestate import GameStateManager
 # Load environment variables
 load_dotenv()
 
-class RAGGameAgent:
+class RAGGameAgent(Agent):
     """
     Agent that uses RAG to improve game playing by leveraging past experiences
-    and game knowledge
+    and game knowledge. Inherits from textarena.core.Agent for compatibility.
     """
     
-    def __init__(self, model_name: str = "claude-3-7-sonnet-20250219"):
+    def __init__(self, model_name: str = "claude-3-7-sonnet-20250219", system_prompt: Optional[str] = None, max_tokens: int = 1500, temperature: float = 0.7, verbose: bool = False):
         """Initialize the RAG Game Agent"""
+        super().__init__()
         self.model_name = model_name
+        self.system_prompt = system_prompt or "You are an expert game player and programmer. Analyze the game state and code carefully to choose the optimal action."
+        self.max_tokens = max_tokens
+        self.temperature = temperature
+        self.verbose = verbose
+        
         self.state_manager = GameStateManager()
         self.current_session_id = None
         self.current_game_name = None
@@ -105,7 +112,7 @@ class RAGGameAgent:
                 return match.group(1)
         
         # If no match found, look for known game names
-        known_games = ["Poker", "Negotiation", "SpellingBee", "Chess", "TicTacToe", "Battleship"]
+        known_games = ["Poker", "Negotiation", "SpellingBee"]
         for game in known_games:
             if game.lower() in observation.lower():
                 return game
@@ -122,10 +129,13 @@ class RAGGameAgent:
             observation: Current observation to find relevant patterns
             
         Returns:
-            Dictionary with game rules, patterns, and outcomes
+            Dictionary with game rules, code, patterns, and outcomes
         """
         # Get the rules for this game
         rules = await self.state_manager.get_game_rules(game_name)
+        
+        # Get the implementation code for this game
+        code = await self.state_manager.get_game_code(game_name)
         
         # Get relevant patterns for this observation
         patterns = await self.state_manager.retrieve_game_patterns(game_name, observation)
@@ -143,10 +153,64 @@ class RAGGameAgent:
         return {
             "game_name": game_name,
             "rules": rules,
+            "code": code,
             "patterns": patterns,
             "outcomes": outcomes,
             "similar_observations": similar_observations
         }
+    
+    async def _make_request(self, observation: str) -> str:
+        """
+        Make a single API request to Anthropic and return the generated action.
+        This follows the pattern from AsyncAnthropicAgent.
+        """
+        # If this is the first observation, extract game name and start session
+        if not self.current_session_id:
+            # Extract game name from observation
+            game_name = await self._extract_game_name(observation)
+            self.current_game_name = game_name
+            self.current_session_id = await self.start_game(game_name)
+        
+        # Try to extract player_id from the observation
+        player_id_match = re.search(r'Player (\d+)', observation)
+        if player_id_match:
+            player_id = int(player_id_match.group(1))
+        else:
+            # Default to player 0
+            player_id = 0
+        
+        self.player_id = player_id
+        
+        # Generate action and reasoning
+        action, _ = await self.generate_action(observation, player_id)
+        return action
+    
+    async def _retry_request(self, observation: str, retries: int = 3, delay: int = 5) -> str:
+        """
+        Attempt to make an API request with retries.
+        This follows the pattern from AsyncAnthropicAgent.
+
+        Args:
+            observation (str): The input to process.
+            retries (int): The number of attempts to try.
+            delay (int): Seconds to wait between attempts.
+
+        Raises:
+            Exception: The last exception caught if all retries fail.
+        """
+        last_exception = None
+        for attempt in range(1, retries + 1):
+            try:
+                response = await self._make_request(observation)
+                if self.verbose:
+                    print(f"\nObservation: {observation}\nResponse: {response}")
+                return response
+            except Exception as e:
+                last_exception = e
+                print(f"Attempt {attempt} failed with error: {e}")
+                if attempt < retries:
+                    await asyncio.sleep(delay)
+        raise last_exception
     
     async def generate_action(self, observation: str, player_id: int) -> Tuple[str, str]:
         """
@@ -159,12 +223,6 @@ class RAGGameAgent:
         Returns:
             Tuple of (action, reasoning)
         """
-        if not self.current_session_id:
-            # Extract game name from observation
-            game_name = await self._extract_game_name(observation)
-            self.current_game_name = game_name
-            self.current_session_id = await self.start_game(game_name)
-        
         self.player_id = player_id
         self.current_turn += 1
         
@@ -190,9 +248,24 @@ class RAGGameAgent:
         
         """
         
+        # Add code-based reasoning section
+        prompt += f"""
+        First, analyze the game mechanics and possible actions by thinking through the implementation:
+        
+        Game Implementation (for reference):
+        ```python
+        {context['code'][:2000] if len(context['code']) > 2000 else context['code']}
+        ```
+        
+        Based on this implementation, break down:
+        1. What actions are valid in the current state
+        2. How the game processes these actions
+        3. What the likely outcomes of different actions would be
+        """
+        
         # Add patterns if available
         if context['patterns']:
-            prompt += "\nRelevant Patterns:\n"
+            prompt += "\nRelevant Patterns from Past Games:\n"
             for pattern in context['patterns']:
                 prompt += f"""
                 Pattern: {pattern['observation_pattern']}
@@ -220,20 +293,27 @@ class RAGGameAgent:
                 prompt += f"- {outcome['outcome'].upper()}: {outcome['reason']} (seen {outcome['frequency']} times)\n"
         
         prompt += """
-        Based on the game rules, current state, and past experiences, decide on the best action to take.
+        Based on your analysis of the game mechanics, rules, current state, and past experiences:
+        
+        1. First, write a brief pseudocode or algorithm for how you'll approach this turn
+        2. Then, decide on the best action to take
         
         Provide your response in this format:
+        ALGORITHM:
+        [Your step-by-step algorithm or pseudocode for approaching this game state]
+        
         ACTION: [Your chosen action exactly as it should be sent to the game]
-        REASONING: [Your step-by-step reasoning for this action]
+        
+        REASONING: [Your detailed reasoning for this action]
         """
         
         # Generate response using Anthropic
         try:
             response = self.client.messages.create(
                 model=self.model_name,
-                max_tokens=1000,
-                temperature=0.7,
-                system="You are an expert game player. Analyze the game state carefully and choose the optimal action.",
+                max_tokens=self.max_tokens,
+                temperature=self.temperature,
+                system=self.system_prompt,
                 messages=[
                     {"role": "user", "content": prompt}
                 ]
@@ -241,29 +321,35 @@ class RAGGameAgent:
             
             content = response.content[0].text
             
-            # Extract action and reasoning
+            # Extract algorithm, action and reasoning
+            algorithm_match = re.search(r'ALGORITHM:(.*?)(?:ACTION:|$)', content, re.DOTALL)
             action_match = re.search(r'ACTION:\s*(.*?)(?:\n|$)', content)
-            reasoning_match = re.search(r'REASONING:\s*(.*?)(?:\n\n|$)', content, re.DOTALL)
+            reasoning_match = re.search(r'REASONING:(.*?)(?:\n\n|$)', content, re.DOTALL)
             
+            algorithm = algorithm_match.group(1).strip() if algorithm_match else ""
             action = action_match.group(1).strip() if action_match else content
             reasoning = reasoning_match.group(1).strip() if reasoning_match else ""
+            
+            # Combine algorithm and reasoning for storage
+            full_reasoning = f"ALGORITHM:\n{algorithm}\n\nREASONING:\n{reasoning}"
             
             # Update the game state with the action and reasoning
             await self.state_manager.update_turn_action(
                 self.current_session_id,
                 self.current_turn,
                 action,
-                reasoning
+                full_reasoning
             )
             
-            return action, reasoning
+            return action, full_reasoning
         except Exception as e:
             print(f"Error generating action: {str(e)}")
             return "Error generating action", str(e)
     
     async def __call__(self, observation: str) -> str:
         """
-        Process an observation and return an action
+        Process an observation and return an action.
+        This is the main entry point required by TextArena.
         
         Args:
             observation: Current game observation
@@ -271,26 +357,9 @@ class RAGGameAgent:
         Returns:
             Action to take
         """
-        # Try to extract player_id from the observation
-        player_id_match = re.search(r'Player (\d+)', observation)
-        if player_id_match:
-            player_id = int(player_id_match.group(1))
-        else:
-            # Default to player 0
-            player_id = 0
-        
-        self.player_id = player_id
-        
-        # If this is the first observation, extract game name and start session
-        if not self.current_session_id:
-            # Extract game name from observation
-            game_name = await self._extract_game_name(observation)
-            self.current_game_name = game_name
-            self.current_session_id = await self.start_game(game_name)
-        
-        # Generate action and reasoning
-        action, _ = await self.generate_action(observation, player_id)
-        return action
+        if not isinstance(observation, str):
+            raise ValueError(f"Observation must be a string. Received type: {type(observation)}")
+        return await self._retry_request(observation)
 
 
 # Example usage
